@@ -302,6 +302,13 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     # set values above 100 to nodata
     fcf_ds['fcf'] = fcf_ds['fcf'].where(fcf_ds['fcf'] <= 100, np.nan)/100
 
+    # Changing resolution of the FCF dataset to 1km
+    fcf_ds = fcf_ds.rio.reproject(
+    snowon_s1_ds.rio.crs,
+    resolution=1000,
+    resampling=rio.enums.Resampling.average
+    )
+
     # combine datasets
     print('combining datasets')
     ds_list = [snowon_s1_ds, snowoff_s1_ds, s2_ds, snodas_ds, cop30_ds, fcf_ds]
