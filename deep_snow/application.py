@@ -5,6 +5,7 @@ import xarray as xr
 import pystac_client
 import planetary_computer
 import rasterio as rio
+import argparse
 import rioxarray as rxr
 from rioxarray.merge import merge_arrays
 from urllib.request import urlretrieve
