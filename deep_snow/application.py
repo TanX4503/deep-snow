@@ -788,6 +788,35 @@ def predict_sd_ts(aoi, target_date, snowoff_date, model_path, out_dir, out_crs='
     ds = xr.concat(ds_list, dim='time')
     
     return ds
+
+def evaluate_model(ds):
+    import numpy as np
+    
+    if 'aso_sd' not in ds:
+        print("⚠️ No ground truth (aso_sd) found. Cannot evaluate.")
+        return
+    
+    pred = ds['predicted_sd'].values
+    true = ds['aso_sd'].values
+    
+    # remove NaNs
+    mask = ~np.isnan(true)
+    pred = pred[mask]
+    true = true[mask]
+    
+    # metrics
+    rmse = np.sqrt(np.mean((pred - true) ** 2))
+    mae = np.mean(np.abs(pred - true))
+    
+    # R²
+    ss_res = np.sum((true - pred) ** 2)
+    ss_tot = np.sum((true - np.mean(true)) ** 2)
+    r2 = 1 - (ss_res / ss_tot)
+    
+    print("\n📊 Evaluation Results:")
+    print(f"RMSE: {rmse:.3f}")
+    print(f"MAE:  {mae:.3f}")
+    print(f"R²:   {r2:.3f}")
         
 def main():
     parser = get_parser()
@@ -802,20 +831,7 @@ def main():
     # download data
     ds = deep_snow(args.aoi, args.target_date, args.snowoff_date, args.model_path, args.out_dir, args.delete_inputs, args.cloud_cover)
 
+    evaluate_model(ds)
+    
 if __name__ == "__main__":
    main()
-    
-    
-    
-    
-
-    
-    
-    
-    
-        
-        
-        
-
-
-
