@@ -870,9 +870,12 @@ def main():
     parser = get_parser()
     args = parser.parse_args()
 
-    # if no cuda raise an error
-    if not torch.cuda.is_available():
-        raise RuntimeError("No cuda enabled GPU found on this platform.")
+    # Allow CPU Run
+    gpu = torch.cuda.is_available()
+    if gpu:
+        print("Using GPU")
+    else:
+        print("Using CPU")
 
     # make sure out_dir exists or create it
     Path(args.out_dir).mkdir(exist_ok = True)
