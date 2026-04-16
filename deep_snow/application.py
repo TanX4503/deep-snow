@@ -234,28 +234,37 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     s2_ds = s2_ds.median(dim='time').squeeze().compute()
 
     # download and unzip snodas snow depths
-    print('Searching for snodas data')
-    target_datetime = pd.to_datetime(target_date)
-    snodas_url = f'https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{target_datetime.year}/{target_datetime.strftime("%m")}_{target_datetime.strftime("%b")}/SNODAS_{target_date}.tar'
-    os.makedirs('/tmp/snodas', exist_ok=True)
-    # Download the file
-    subprocess.run([
-        "wget", "-P", "/tmp/snodas", "-nd", "--no-check-certificate",
-        "--reject", "index.html*", "-np", "-e", "robots=off", snodas_url
-    ], check=True)
+    #print('Searching for snodas data')
+    #target_datetime = pd.to_datetime(target_date)
+    #snodas_url = f'https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{target_datetime.year}/{target_datetime.strftime("%m")}_{target_datetime.strftime("%b")}/SNODAS_{target_date}.tar'
+    #os.makedirs('/tmp/snodas', exist_ok=True)
+    ## Download the file
+    #subprocess.run([
+    #    "wget", "-P", "/tmp/snodas", "-nd", "--no-check-certificate",
+    #    "--reject", "index.html*", "-np", "-e", "robots=off", snodas_url
+    #], check=True)
+    #
+    ## Extract the tarball
+    #snodas_fn = f"/tmp/snodas/SNODAS_{target_date}.tar"
+    #subprocess.run(["tar", "-xf", snodas_fn, "-C", "/tmp/snodas"], check=True)
+    #
+    ## Decompress the .gz files
+    #subprocess.run(["gzip", "-d", "-f"] + [f for f in os.listdir('/tmp/snodas') if f.startswith("us_ssmv11036") and f.endswith(".gz")], cwd="/tmp/snodas", check=True)
+    #
+    ## crop, reproject, and mask snodas snow depths
+    #snodas_da = rxr.open_rasterio(glob('/tmp/snodas/us_ssmv11036*.txt')[0]).squeeze()
+    ##snodas_clipped_da = snodas_da.rio.clip_box(snowon_s1_ds, crs="EPSG:4326")
+    #snodas_resampled_da = snodas_da.rio.reproject_match(snowon_s1_ds, resampling=rio.enums.Resampling.bilinear)
+    #snodas_resampled_da = snodas_resampled_da.where(snodas_resampled_da != -9999)/1000
+    #snodas_ds = snodas_resampled_da.to_dataset(name="snodas_sd")
+
+    #create placeholder snodas band
+    print('SNODAS not available for this AOI, using zero-valued proxy band')
+
+    #matching the grid shape so input features stay unchanged
+    snodas_resampled_da = xr.zeros_like(snowon_s1_ds['vv']).astype('float32')
     
-    # Extract the tarball
-    snodas_fn = f"/tmp/snodas/SNODAS_{target_date}.tar"
-    subprocess.run(["tar", "-xf", snodas_fn, "-C", "/tmp/snodas"], check=True)
-    
-    # Decompress the .gz files
-    subprocess.run(["gzip", "-d", "-f"] + [f for f in os.listdir('/tmp/snodas') if f.startswith("us_ssmv11036") and f.endswith(".gz")], cwd="/tmp/snodas", check=True)
-    
-    # crop, reproject, and mask snodas snow depths
-    snodas_da = rxr.open_rasterio(glob('/tmp/snodas/us_ssmv11036*.txt')[0]).squeeze()
-    #snodas_clipped_da = snodas_da.rio.clip_box(snowon_s1_ds, crs="EPSG:4326")
-    snodas_resampled_da = snodas_da.rio.reproject_match(snowon_s1_ds, resampling=rio.enums.Resampling.bilinear)
-    snodas_resampled_da = snodas_resampled_da.where(snodas_resampled_da != -9999)/1000
+    #converting to dataset - to be used later
     snodas_ds = snodas_resampled_da.to_dataset(name="snodas_sd")
 
     # search for COP30 DEM 
