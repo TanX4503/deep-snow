@@ -34,6 +34,10 @@ from deep_snow.utils import calc_norm, undo_norm, db_scale, calc_dowy
 from deep_snow.dataset import norm_dict
 import deep_snow.models
 
+import tarfile
+import gzip
+import shutil
+
 def parse_bounding_box(value):
     try:
         minlon, minlat, maxlon, maxlat = map(float, value.split())
@@ -261,10 +265,54 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     #create placeholder snodas band
     print('SNODAS not available for this AOI, using zero-valued proxy band')
 
-    #matching the grid shape so input features stay unchanged
-    snodas_resampled_da = xr.zeros_like(snowon_s1_ds['vv']).astype('float32')
-    
-    #converting to dataset - to be used later
+    print('Loading SNODAS as ground truth (aso_sd)')
+
+    snodas_dir = os.path.join(out_dir, "snodas")
+    os.makedirs(snodas_dir, exist_ok=True)
+
+    target_datetime = pd.to_datetime(target_date)
+    snodas_url = f'https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{target_datetime.year}/{target_datetime.strftime("%m")}_{target_datetime.strftime("%b")}/SNODAS_{target_date}.tar'
+
+    snodas_tar = os.path.join(snodas_dir, f"SNODAS_{target_date}.tar")
+
+    # download if needed
+    if not os.path.exists(snodas_tar):
+        urlretrieve(snodas_url, snodas_tar)
+
+    # extract tar
+    with tarfile.open(snodas_tar) as tar:
+        tar.extractall(path=snodas_dir)
+
+    # extract gz
+    for f in os.listdir(snodas_dir):
+        if f.startswith("us_ssmv11036") and f.endswith(".gz"):
+            gz_path = os.path.join(snodas_dir, f)
+            out_path = os.path.join(snodas_dir, f[:-3])
+            with gzip.open(gz_path, 'rb') as f_in:
+                with open(out_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+
+    # load txt
+    txt_files = glob(os.path.join(snodas_dir, "us_ssmv11036*.txt"))
+    snodas_da = rxr.open_rasterio(txt_files[0]).squeeze()
+
+    # fix CRS (important)
+    snodas_da = snodas_da.rio.write_crs("EPSG:4326")
+
+    # reproject
+    snodas_resampled_real = snodas_da.rio.reproject_match(
+    snowon_s1_ds,
+    resampling=rio.enums.Resampling.bilinear
+    )
+
+    snodas_resampled_real = snodas_resampled_real.where(snodas_resampled_real != -9999) / 1000
+
+    # THIS is your ground truth
+    aso_ds = snodas_resampled_real.to_dataset(name="aso_sd")
+
+    print('Using zero SNODAS as model input')
+
+    snodas_resampled_da = xr.zeros_like(snowon_s1_ds['snowon_vv']).astype('float32')
     snodas_ds = snodas_resampled_da.to_dataset(name="snodas_sd")
 
     # search for COP30 DEM 
@@ -320,7 +368,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
 
     # combine datasets
     print('combining datasets')
-    ds_list = [snowon_s1_ds, snowoff_s1_ds, s2_ds, snodas_ds, cop30_ds, fcf_ds]
+    ds_list = [snowon_s1_ds, snowoff_s1_ds, s2_ds, snodas_ds, cop30_ds, fcf_ds, aso_ds]
     ds = xr.merge(ds_list, compat='override', join='override').squeeze()
 
     # radar data variables
@@ -829,8 +877,25 @@ def main():
     # make sure out_dir exists or create it
     Path(args.out_dir).mkdir(exist_ok = True)
     # download data
-    ds = deep_snow(args.aoi, args.target_date, args.snowoff_date, args.model_path, args.out_dir, args.delete_inputs, args.cloud_cover)
+    crs = download_data(
+        args.aoi,
+        args.target_date,
+        args.snow_off_date,
+        buffer_period=3,
+        out_dir=args.out_dir,
+        cloud_cover=args.cloud_cover
+    )
 
+    ds = apply_model(
+        crs,
+        args.model_path,
+        args.out_dir,
+        args.out_name,
+        write_tif=True,
+        delete_inputs=args.delete_inputs,
+        out_crs=args.out_crs,
+        gpu=torch.cuda.is_available()
+    )
     evaluate_model(ds)
     
 if __name__ == "__main__":
