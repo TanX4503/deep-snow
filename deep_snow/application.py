@@ -103,15 +103,46 @@ def url_tqdm_hook(t):
 
     return update_to
 
-def url_download(url, out_fp, overwrite = False):
-    # check if file already exists
-    if not exists(out_fp) or overwrite == True:
-        # this tqdm progress bar comes from: https://gist.github.com/leimao/37ff6e990b3226c2c9670a2cd1e4a6f5
-        with tqdm(unit = 'B', unit_scale = True, unit_divisor = 1024, miniters = 1, desc = out_fp) as t:
-            urlretrieve(url, out_fp, reporthook = url_tqdm_hook(t))
-    # if already exists. skip download.
-    else:
+def url_download(url, out_fp, overwrite=False, max_retries=5):
+    import time
+    import os
+    from urllib.error import ContentTooShortError, URLError
+
+    if exists(out_fp) and not overwrite:
         print('file already exists, skipping')
+        return
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # remove partial file before retry
+            if exists(out_fp):
+                os.remove(out_fp)
+
+            with tqdm(
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+                miniters=1,
+                desc=out_fp
+            ) as t:
+                urlretrieve(url, out_fp, reporthook=url_tqdm_hook(t))
+
+            print(f"download successful: {out_fp}")
+            return
+
+        except (ContentTooShortError, URLError, Exception) as e:
+            print(f"download failed on attempt {attempt}/{max_retries}: {e}")
+
+            if exists(out_fp):
+                try:
+                    os.remove(out_fp)
+                except OSError:
+                    pass
+
+            if attempt == max_retries:
+                raise
+
+            time.sleep(3)
 
 def download_fcf(out_fp):
     # this is the url from Lievens et al. 2021 paper
