@@ -375,7 +375,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
 
     # download fractional forest cover data
     print('downloading fractional forest cover data')
-    fcf_path =os.path.join(out_dir, 'fcf_global.tif')
+    fcf_path = os.path.expanduser('~/fcf_global.tif')
     download_fcf(fcf_path)
     
     # open as dataArray and return
