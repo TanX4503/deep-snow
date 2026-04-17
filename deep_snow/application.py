@@ -805,7 +805,14 @@ def calculate_uncertainty(ds, model_path):
 
 def predict_sd(aoi, target_date, snowoff_date, model_path, out_dir, out_crs='utm', out_name='deep-snow_sd.tif', write_tif=True, delete_inputs=False, cloud_cover=25):
     # download data
-    crs = download_data(aoi, target_date, snowoff_date, out_dir, cloud_cover)
+    crs = download_data(
+    aoi=aoi,
+    target_date=target_date,
+    snowoff_date=snowoff_date,
+    buffer_period=6,
+    out_dir=out_dir,
+    cloud_cover=cloud_cover
+    )
     # apply model
     ds = apply_model(crs, model_path, out_dir, out_name, write_tif, delete_inputs, out_crs='utm')
 
