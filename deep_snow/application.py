@@ -29,6 +29,10 @@ import pickle
 import xdem
 import time
 import subprocess
+import sys
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deep_snow.utils import calc_norm, undo_norm, db_scale, calc_dowy
 from deep_snow.dataset import norm_dict
@@ -150,6 +154,23 @@ def download_fcf(out_fp):
     # download just forest cover fraction to out file
     url_download(fcf_url, out_fp)
 
+def clean_netcdf_attrs(ds):
+    for var in ds.variables.values():
+        cleaned_attrs = {}
+        for key, value in var.attrs.items():
+            value_array = np.asarray(value)
+            if value_array.dtype.kind == "u":
+                if value_array.ndim == 0:
+                    value = int(value_array)
+                else:
+                    value = value_array.astype("int32")
+            cleaned_attrs[key] = value
+        var.attrs = cleaned_attrs
+    return ds
+
+def sign_stac_items(items):
+    return [planetary_computer.sign(item) for item in items]
+
 def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_cover):
 
     aoi = {
@@ -172,8 +193,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     snowoff_date_range = date_range(snowoff_date, buffer_period)
 
     stac = pystac_client.Client.open(
-    "https://planetarycomputer.microsoft.com/api/stac/v1",
-    modifier=planetary_computer.sign_inplace)
+    "https://planetarycomputer.microsoft.com/api/stac/v1")
 
     max_retries = 100
     retry_delay = 5  # seconds
@@ -195,6 +215,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
             else:
                 raise  # Raise the last exception if max retries reached
     
+    items = sign_stac_items(items)
     snowon_s1_ds = odc.stac.load(items,chunks={"x": 2048, "y": 2048},
                                  crs=crs,
                                  resolution=50,
@@ -226,6 +247,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
             else:
                 raise  # Raise the last exception if max retries reached
     
+    items = sign_stac_items(items)
     snowoff_s1_ds = odc.stac.load(items,chunks={"x": 2048, "y": 2048},
                                   like=snowon_s1_ds,
                                   groupby='sat:absolute_orbit')
@@ -255,6 +277,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
             else:
                 raise  # Raise the last exception if max retries reached
     
+    items = sign_stac_items(items)
     s2_ds = odc.stac.load(items,chunks={"x": 2048, "y": 2048},
                           like=snowon_s1_ds,
                           groupby='solar_day').where(lambda x: x > 0, other=np.nan)
@@ -293,53 +316,47 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     #snodas_resampled_da = snodas_resampled_da.where(snodas_resampled_da != -9999)/1000
     #snodas_ds = snodas_resampled_da.to_dataset(name="snodas_sd")
 
-    #create placeholder snodas band
-    print('SNODAS not available for this AOI, using zero-valued proxy band')
+    print('Loading real SNODAS as evaluation reference (aso_sd)')
+    aso_ds = None
 
-    print('Loading SNODAS as ground truth (aso_sd)')
+    try:
+        snodas_dir = os.path.join(out_dir, "snodas")
+        os.makedirs(snodas_dir, exist_ok=True)
 
-    snodas_dir = os.path.join(out_dir, "snodas")
-    os.makedirs(snodas_dir, exist_ok=True)
+        target_datetime = pd.to_datetime(target_date)
+        snodas_url = f'https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{target_datetime.year}/{target_datetime.strftime("%m")}_{target_datetime.strftime("%b")}/SNODAS_{target_date}.tar'
+        snodas_tar = os.path.join(snodas_dir, f"SNODAS_{target_date}.tar")
 
-    target_datetime = pd.to_datetime(target_date)
-    snodas_url = f'https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{target_datetime.year}/{target_datetime.strftime("%m")}_{target_datetime.strftime("%b")}/SNODAS_{target_date}.tar'
+        if not os.path.exists(snodas_tar):
+            urlretrieve(snodas_url, snodas_tar)
 
-    snodas_tar = os.path.join(snodas_dir, f"SNODAS_{target_date}.tar")
+        with tarfile.open(snodas_tar) as tar:
+            tar.extractall(path=snodas_dir)
 
-    # download if needed
-    if not os.path.exists(snodas_tar):
-        urlretrieve(snodas_url, snodas_tar)
+        for fn in os.listdir(snodas_dir):
+            if fn.startswith("us_ssmv11036") and fn.endswith(".gz"):
+                gz_path = os.path.join(snodas_dir, fn)
+                out_path = os.path.join(snodas_dir, fn[:-3])
+                if not os.path.exists(out_path):
+                    with gzip.open(gz_path, 'rb') as f_in:
+                        with open(out_path, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
 
-    # extract tar
-    with tarfile.open(snodas_tar) as tar:
-        tar.extractall(path=snodas_dir)
+        txt_files = glob(os.path.join(snodas_dir, "us_ssmv11036*.txt"))
+        if not txt_files:
+            raise FileNotFoundError("No SNODAS snow-depth txt file found after extraction.")
 
-    # extract gz
-    for f in os.listdir(snodas_dir):
-        if f.startswith("us_ssmv11036") and f.endswith(".gz"):
-            gz_path = os.path.join(snodas_dir, f)
-            out_path = os.path.join(snodas_dir, f[:-3])
-            with gzip.open(gz_path, 'rb') as f_in:
-                with open(out_path, 'wb') as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-
-    # load txt
-    txt_files = glob(os.path.join(snodas_dir, "us_ssmv11036*.txt"))
-    snodas_da = rxr.open_rasterio(txt_files[0]).squeeze()
-
-    # fix CRS (important)
-    snodas_da = snodas_da.rio.write_crs("EPSG:4326")
-
-    # reproject
-    snodas_resampled_real = snodas_da.rio.reproject_match(
-    snowon_s1_ds,
-    resampling=rio.enums.Resampling.bilinear
-    )
-
-    snodas_resampled_real = snodas_resampled_real.where(snodas_resampled_real != -9999) / 1000
-
-    # THIS is your ground truth
-    aso_ds = snodas_resampled_real.to_dataset(name="aso_sd")
+        snodas_da = rxr.open_rasterio(txt_files[0]).squeeze()
+        snodas_da = snodas_da.rio.write_crs("EPSG:4326")
+        snodas_resampled_real = snodas_da.rio.reproject_match(
+            snowon_s1_ds,
+            resampling=rio.enums.Resampling.bilinear
+        )
+        snodas_resampled_real = snodas_resampled_real.where(snodas_resampled_real != -9999) / 1000
+        aso_ds = snodas_resampled_real.astype('float32').to_dataset(name="aso_sd")
+    except Exception as e:
+        print(f"Could not load real SNODAS evaluation reference: {e}")
+        print("Continuing without aso_sd; evaluation will be skipped.")
 
     print('Using zero SNODAS as model input')
 
@@ -382,8 +399,12 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     # download fractional forest cover data
     print('downloading fractional forest cover data')
     fcf_path = os.path.expanduser('~/fcf_global.tif')
-    download_fcf(fcf_path)
-    
+
+    if not os.path.exists(fcf_path):
+        download_fcf(fcf_path)
+    else:
+        print("File already exists, skipping download.")
+        
     # open as dataArray and return
     fcf_ds = rxr.open_rasterio(fcf_path)
     
@@ -394,7 +415,11 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     # reproject to match radar dataset
     fcf_ds = fcf_ds.rio.reproject_match(snowon_s1_ds, resampling=rio.enums.Resampling.average)
     # set values above 100 to nodata
-    fcf_ds['fcf'] = fcf_ds['fcf'].where(fcf_ds['fcf'] <= 100, np.nan)/100
+    fcf_ds['fcf'] = (fcf_ds['fcf'].where(fcf_ds['fcf'] <= 100, np.nan)/100).astype('float32')
+    fcf_ds['fcf'].attrs = {
+        'long_name': 'fractional forest cover',
+        'units': '1',
+    }
 
     ## Changing resolution of the FCF dataset to 1km
     #fcf_ds = fcf_ds.rio.reproject(
@@ -405,7 +430,9 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
 
     # combine datasets
     print('combining datasets')
-    ds_list = [snowon_s1_ds, snowoff_s1_ds, s2_ds, snodas_ds, cop30_ds, fcf_ds, aso_ds]
+    ds_list = [snowon_s1_ds, snowoff_s1_ds, s2_ds, snodas_ds, cop30_ds, fcf_ds]
+    if aso_ds is not None:
+        ds_list.append(aso_ds)
     ds = xr.merge(ds_list, compat='override', join='override').squeeze()
 
     # radar data variables
@@ -460,6 +487,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
 
     data_fn = f'{out_dir}/model_inputs.nc'
     print('writing input data')
+    ds = clean_netcdf_attrs(ds)
     ds.to_netcdf(data_fn)
     print('finished preparing dataset!')
 
@@ -892,23 +920,33 @@ def evaluate_model(ds):
     true = ds['aso_sd'].values
     
     # remove NaNs
-    mask = ~np.isnan(true)
+    mask = ~np.isnan(true) & ~np.isnan(pred)
     pred = pred[mask]
     true = true[mask]
+
+    if pred.size == 0:
+        print("No valid ground-truth/prediction pairs found. Cannot evaluate.")
+        return
     
     # metrics
     rmse = np.sqrt(np.mean((pred - true) ** 2))
     mae = np.mean(np.abs(pred - true))
+    tolerance_m = 0.10
+    accuracy_pct = np.mean(np.abs(pred - true) <= tolerance_m) * 100
     
     # R²
     ss_res = np.sum((true - pred) ** 2)
     ss_tot = np.sum((true - np.mean(true)) ** 2)
-    r2 = 1 - (ss_res / ss_tot)
+    r2 = None if np.isclose(ss_tot, 0) else 1 - (ss_res / ss_tot)
     
     print("\n📊 Evaluation Results:")
     print(f"RMSE: {rmse:.3f}")
     print(f"MAE:  {mae:.3f}")
-    print(f"R²:   {r2:.3f}")
+    if r2 is None:
+        print("R^2:   undefined (ground truth has no variation)")
+    else:
+        print(f"R^2:   {r2:.3f}")
+    print(f"Accuracy within {tolerance_m:.2f} m: {accuracy_pct:.1f}%")
         
 def main():
     parser = get_parser()
