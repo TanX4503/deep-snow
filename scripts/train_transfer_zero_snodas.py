@@ -113,6 +113,8 @@ class PatchDataset(torch.utils.data.Dataset):
         augment,
         deterministic=False,
         seed=0,
+        split="all",
+        val_fraction=0.2,
     ):
         self.paths = paths
         self.samples_per_file = samples_per_file
@@ -120,6 +122,48 @@ class PatchDataset(torch.utils.data.Dataset):
         self.augment = augment
         self.deterministic = deterministic
         self.seed = seed
+        self.split = split
+        self.val_fraction = val_fraction
+        self.crop_windows = self.build_crop_windows()
+
+    def build_crop_windows(self):
+        crop_windows = []
+        rng = random.Random(self.seed)
+        for path in self.paths:
+            with xr.open_dataset(path) as ds:
+                height = ds.sizes["y"]
+                width = ds.sizes["x"]
+
+            if height < self.crop_size or width < self.crop_size:
+                raise ValueError(
+                    f"{path} is {height}x{width}, smaller than crop size "
+                    f"{self.crop_size}. Use a smaller --crop-size."
+                )
+
+            step = max(1, self.crop_size // 2)
+            y_starts = list(range(0, height - self.crop_size + 1, step))
+            x_starts = list(range(0, width - self.crop_size + 1, step))
+            if y_starts[-1] != height - self.crop_size:
+                y_starts.append(height - self.crop_size)
+            if x_starts[-1] != width - self.crop_size:
+                x_starts.append(width - self.crop_size)
+
+            windows = [(y0, x0) for y0 in y_starts for x0 in x_starts]
+            rng.shuffle(windows)
+            val_count = max(1, int(round(len(windows) * self.val_fraction)))
+
+            if self.split == "train":
+                windows = windows[val_count:]
+            elif self.split == "val":
+                windows = windows[:val_count]
+            elif self.split != "all":
+                raise ValueError(f"Unknown split: {self.split}")
+
+            if not windows:
+                raise ValueError(f"No crop windows available for {path} split={self.split}.")
+
+            crop_windows.append(windows)
+        return crop_windows
 
     def __len__(self):
         return len(self.paths) * self.samples_per_file
@@ -127,21 +171,12 @@ class PatchDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         file_idx = idx // self.samples_per_file
         tensors = self.load_tensors(self.paths[file_idx])
-        height, width = tensors[0].shape[-2:]
-
-        if height < self.crop_size or width < self.crop_size:
-            raise ValueError(
-                f"{self.paths[file_idx]} is {height}x{width}, smaller than crop size "
-                f"{self.crop_size}. Use a smaller --crop-size."
-            )
 
         if self.deterministic:
-            rng = random.Random(self.seed + idx)
-            y0 = rng.randint(0, height - self.crop_size)
-            x0 = rng.randint(0, width - self.crop_size)
+            window_idx = idx % len(self.crop_windows[file_idx])
         else:
-            y0 = random.randint(0, height - self.crop_size)
-            x0 = random.randint(0, width - self.crop_size)
+            window_idx = random.randrange(len(self.crop_windows[file_idx]))
+        y0, x0 = self.crop_windows[file_idx][window_idx]
 
         y1 = y0 + self.crop_size
         x1 = x0 + self.crop_size
@@ -196,7 +231,17 @@ class PatchDataset(torch.utils.data.Dataset):
         return torch.from_numpy(np.float32(ds[name].values))
 
 
-def make_loader(paths, batch_size, augment, num_workers, samples_per_file, crop_size, seed):
+def make_loader(
+    paths,
+    batch_size,
+    augment,
+    num_workers,
+    samples_per_file,
+    crop_size,
+    seed,
+    split="all",
+    val_fraction=0.2,
+):
     dataset = PatchDataset(
         paths,
         samples_per_file=samples_per_file,
@@ -204,6 +249,8 @@ def make_loader(paths, batch_size, augment, num_workers, samples_per_file, crop_
         augment=augment,
         deterministic=not augment,
         seed=seed,
+        split=split,
+        val_fraction=val_fraction,
     )
     return torch.utils.data.DataLoader(
         dataset,
@@ -289,8 +336,12 @@ def main():
     for path in val_paths:
         print(f"  val:   {path}")
     print(f"Zeroed input channel: snodas_sd")
-    if len(train_paths) == 1 and train_paths == val_paths:
-        print("Warning: only one local NetCDF was found, so validation uses held-out crops from the same file.")
+    single_file_split = len(train_paths) == 1 and train_paths == val_paths
+    if single_file_split:
+        print(
+            "Warning: only one local NetCDF was found, so validation uses a held-out "
+            f"{args.val_fraction:.0%} split of crop windows from the same file."
+        )
 
     train_loader = make_loader(
         train_paths,
@@ -300,6 +351,8 @@ def main():
         samples_per_file=args.samples_per_file,
         crop_size=args.crop_size,
         seed=args.seed,
+        split="train" if single_file_split else "all",
+        val_fraction=args.val_fraction,
     )
     val_loader = make_loader(
         val_paths,
@@ -309,6 +362,8 @@ def main():
         samples_per_file=args.val_samples_per_file,
         crop_size=args.crop_size,
         seed=args.seed + 10000,
+        split="val" if single_file_split else "all",
+        val_fraction=args.val_fraction,
     ) if val_paths else None
 
     model = deep_snow.models.ResDepth(n_input_channels=len(INPUT_CHANNELS), depth=5)
