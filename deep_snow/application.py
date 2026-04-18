@@ -386,16 +386,16 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
     # promote to dataset
     fcf_ds = fcf_ds.rename('fcf').squeeze().to_dataset()
     # reproject to match radar dataset
-    fcf_ds = fcf_ds.rio.reproject_match(snowon_s1_ds, resampling=rio.enums.Resampling.bilinear)
+    fcf_ds = fcf_ds.rio.reproject_match(snowon_s1_ds, resampling=rio.enums.Resampling.average)
     # set values above 100 to nodata
     fcf_ds['fcf'] = fcf_ds['fcf'].where(fcf_ds['fcf'] <= 100, np.nan)/100
 
-    # Changing resolution of the FCF dataset to 1km
-    fcf_ds = fcf_ds.rio.reproject(
-    snowon_s1_ds.rio.crs,
-    resolution=1000,
-    resampling=rio.enums.Resampling.average
-    )
+    ## Changing resolution of the FCF dataset to 1km
+    #fcf_ds = fcf_ds.rio.reproject(
+    #snowon_s1_ds.rio.crs,
+    #resolution=1000,
+    #resampling=rio.enums.Resampling.average
+    #)
 
     # combine datasets
     print('combining datasets')
