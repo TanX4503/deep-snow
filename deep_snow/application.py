@@ -459,7 +459,7 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
 
     return crs
 
-def apply_model(crs, model_path, out_dir, out_name, write_tif, delete_inputs, out_crs, gpu=True):
+def apply_model(crs, model_path, out_dir, out_name, write_tif, delete_inputs, out_crs, gpu=False): #change gpu = True
     data_fn = f'{out_dir}/model_inputs.nc'
     print('reading input data')
     ds = xr.open_dataset(data_fn)
