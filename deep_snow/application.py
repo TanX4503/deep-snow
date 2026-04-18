@@ -363,10 +363,16 @@ def download_data(aoi, target_date, snowoff_date, buffer_period, out_dir, cloud_
             else:
                 raise  # Raise the last exception if max retries reached
         
+    #data = []
+    #for item in items:
+    #    dem_path = planetary_computer.sign(item.assets['data']).href
+    #    data.append(rxr.open_rasterio(dem_path))
     data = []
     for item in items:
         dem_path = planetary_computer.sign(item.assets['data']).href
-        data.append(rxr.open_rasterio(dem_path))
+        da = rxr.open_rasterio(dem_path)
+        da.load()
+        data.append(da)
     cop30_da = merge_arrays(data)
     cop30_ds = cop30_da.rename('elevation').squeeze().to_dataset()
     
