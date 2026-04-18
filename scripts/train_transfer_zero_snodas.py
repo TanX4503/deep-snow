@@ -9,13 +9,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import xarray as xr
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import deep_snow.models
-from deep_snow.dataset import Datasetv2
+from deep_snow.dataset import norm_dict, random_transform
+from deep_snow.utils import calc_norm
 
 
 INPUT_CHANNELS = [
@@ -39,7 +41,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Fine-tune ResDepth with the snodas_sd input channel forced to zero."
     )
-    parser.add_argument("--train-glob", required=True, help="Glob for training NetCDF files.")
+    parser.add_argument(
+        "--train-glob",
+        help="Glob for training NetCDF files. Defaults to all local .nc files in this project.",
+    )
     parser.add_argument("--val-glob", help="Glob for validation NetCDF files.")
     parser.add_argument("--checkpoint", required=True, help="Starting 11-channel ResDepth checkpoint.")
     parser.add_argument("--out-dir", default="weights", help="Directory for fine-tuned weights.")
@@ -53,12 +58,25 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--no-augment", action="store_true", help="Disable training augmentations.")
+    parser.add_argument("--crop-size", type=int, default=256, help="Square patch size for training.")
+    parser.add_argument("--samples-per-file", type=int, default=64)
+    parser.add_argument("--val-samples-per-file", type=int, default=16)
     return parser.parse_args()
 
 
 def expand_paths(pattern):
     paths = sorted(glob.glob(pattern, recursive=True))
     return [path for path in paths if os.path.isfile(path)]
+
+
+def discover_local_netcdfs():
+    ignored_dirs = {".git", "__pycache__"}
+    paths = []
+    for path in REPO_ROOT.rglob("*.nc"):
+        if any(part in ignored_dirs for part in path.parts):
+            continue
+        paths.append(str(path))
+    return sorted(paths)
 
 
 def split_train_val(paths, val_fraction, seed):
@@ -86,14 +104,106 @@ def load_checkpoint(path, device):
     return state_dict
 
 
-def make_loader(paths, batch_size, augment, num_workers):
-    selected_channels = INPUT_CHANNELS + [TARGET_CHANNEL]
-    dataset = Datasetv2(
+class PatchDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
         paths,
-        selected_channels,
-        norm=True,
+        samples_per_file,
+        crop_size,
+        augment,
+        deterministic=False,
+        seed=0,
+    ):
+        self.paths = paths
+        self.samples_per_file = samples_per_file
+        self.crop_size = crop_size
+        self.augment = augment
+        self.deterministic = deterministic
+        self.seed = seed
+
+    def __len__(self):
+        return len(self.paths) * self.samples_per_file
+
+    def __getitem__(self, idx):
+        file_idx = idx // self.samples_per_file
+        tensors = self.load_tensors(self.paths[file_idx])
+        height, width = tensors[0].shape[-2:]
+
+        if height < self.crop_size or width < self.crop_size:
+            raise ValueError(
+                f"{self.paths[file_idx]} is {height}x{width}, smaller than crop size "
+                f"{self.crop_size}. Use a smaller --crop-size."
+            )
+
+        if self.deterministic:
+            rng = random.Random(self.seed + idx)
+            y0 = rng.randint(0, height - self.crop_size)
+            x0 = rng.randint(0, width - self.crop_size)
+        else:
+            y0 = random.randint(0, height - self.crop_size)
+            x0 = random.randint(0, width - self.crop_size)
+
+        y1 = y0 + self.crop_size
+        x1 = x0 + self.crop_size
+        tensors = [tensor[:, y0:y1, x0:x1] for tensor in tensors]
+
+        if self.augment:
+            randoms = [random.random(), random.random(), random.randint(0, 3)]
+            tensors = [random_transform(tensor, randoms) for tensor in tensors]
+
+        return tuple(tensors)
+
+    def load_tensors(self, path):
+        with xr.open_dataset(path) as ds:
+            return [self.get_channel(ds, channel) for channel in INPUT_CHANNELS + [TARGET_CHANNEL]]
+
+    def get_channel(self, ds, channel):
+        if channel == "snodas_sd":
+            tensor = self.get_var(ds, "snodas_sd")
+            tensor = torch.clamp(calc_norm(tensor, norm_dict["aso_sd"]), 0, 1)
+        elif channel == "blue":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "B02"), norm_dict["blue"]), 0, 1)
+        elif channel == "swir1":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "B11"), norm_dict["swir1"]), 0, 1)
+        elif channel == "ndsi":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "ndsi"), [-1, 1]), 0, 1)
+        elif channel == "elevation":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "elevation"), norm_dict["elevation"]), 0, 1)
+        elif channel == "northness":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "northness"), [0, 1]), 0, 1)
+        elif channel == "slope":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "slope"), norm_dict["slope"]), 0, 1)
+        elif channel == "curvature":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "curvature"), norm_dict["curvature"]), 0, 1)
+        elif channel == "dowy":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "dowy"), [0, 365]), 0, 1)
+        elif channel == "delta_cr":
+            tensor = torch.clamp(calc_norm(self.get_var(ds, "delta_cr"), norm_dict["delta_cr"]), 0, 1)
+        elif channel == "fcf":
+            tensor = torch.clamp(self.get_var(ds, "fcf"), 0, 1)
+        elif channel == TARGET_CHANNEL:
+            if TARGET_CHANNEL not in ds:
+                raise ValueError(f"NetCDF does not contain {TARGET_CHANNEL}.")
+            tensor = torch.clamp(calc_norm(self.get_var(ds, TARGET_CHANNEL), norm_dict["aso_sd"]), 0, 1)
+        else:
+            raise ValueError(f"Unsupported channel: {channel}")
+
+        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0)
+        return tensor[None, :, :]
+
+    @staticmethod
+    def get_var(ds, name):
+        return torch.from_numpy(np.float32(ds[name].values))
+
+
+def make_loader(paths, batch_size, augment, num_workers, samples_per_file, crop_size, seed):
+    dataset = PatchDataset(
+        paths,
+        samples_per_file=samples_per_file,
+        crop_size=crop_size,
         augment=augment,
-        cache_data=False,
+        deterministic=not augment,
+        seed=seed,
     )
     return torch.utils.data.DataLoader(
         dataset,
@@ -157,33 +267,48 @@ def main():
     else:
         device = torch.device(args.device)
 
-    train_paths = expand_paths(args.train_glob)
+    train_paths = expand_paths(args.train_glob) if args.train_glob else discover_local_netcdfs()
     if not train_paths:
-        raise FileNotFoundError(f"No training files matched: {args.train_glob}")
+        raise FileNotFoundError("No .nc files were found in this project folder.")
 
     if args.val_glob:
         val_paths = expand_paths(args.val_glob)
         if not val_paths:
             raise FileNotFoundError(f"No validation files matched: {args.val_glob}")
     else:
-        train_paths, val_paths = split_train_val(train_paths, args.val_fraction, args.seed)
+        if len(train_paths) > 1:
+            train_paths, val_paths = split_train_val(train_paths, args.val_fraction, args.seed)
+        else:
+            val_paths = list(train_paths)
 
     print(f"Device: {device}")
     print(f"Training files: {len(train_paths)}")
+    for path in train_paths:
+        print(f"  train: {path}")
     print(f"Validation files: {len(val_paths)}")
+    for path in val_paths:
+        print(f"  val:   {path}")
     print(f"Zeroed input channel: snodas_sd")
+    if len(train_paths) == 1 and train_paths == val_paths:
+        print("Warning: only one local NetCDF was found, so validation uses held-out crops from the same file.")
 
     train_loader = make_loader(
         train_paths,
         batch_size=args.batch_size,
         augment=not args.no_augment,
         num_workers=args.num_workers,
+        samples_per_file=args.samples_per_file,
+        crop_size=args.crop_size,
+        seed=args.seed,
     )
     val_loader = make_loader(
         val_paths,
         batch_size=args.batch_size,
         augment=False,
         num_workers=args.num_workers,
+        samples_per_file=args.val_samples_per_file,
+        crop_size=args.crop_size,
+        seed=args.seed + 10000,
     ) if val_paths else None
 
     model = deep_snow.models.ResDepth(n_input_channels=len(INPUT_CHANNELS), depth=5)
